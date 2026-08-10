@@ -1,17 +1,19 @@
 # simulator.py
 from grid_game import GridHuntGame
-from agent import GreedyGridAgent
+from agent import SimpleReflexAgent
 
 def run_grid_hunt():
     env = GridHuntGame()
-    agent = GreedyGridAgent()
+    agent = SimpleReflexAgent()
 
     print("=== UC Berkeley Style Small Grid Hunt Started ===")
     while not env.is_done():
-        percept = env.get_percept(agent)
+        percept = env.get_percept()
         action = agent.sense_and_act(percept)
         env.execute_action(agent, action)
-        print(f"Pos: {percept['agent_pos']} | Food Left: {percept['remaining_food']} | Score: {percept['score']}")
+        # The percept is local-only, so the log reads the global state from the environment
+        print(f"Percept: {percept} | Action: {action:<9} | Pos: {env.agent_pos} "
+              f"Facing: {env.agent_dir:<5} | Food Left: {len(env.food_positions)} | Score: {env.score}")
 
     print(f"\nGame Over! Final Score: {env.score} after {env.steps} steps.")
 

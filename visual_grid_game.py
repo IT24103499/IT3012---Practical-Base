@@ -2,14 +2,25 @@
 import random
 import tkinter as tk
 
+from agent import SimpleReflexAgent
+
 
 class VisualGridHuntGame:
     """A flexible Pacman-style grid environment with support for configurable opponents and larger scales."""
+
+    # Offset applied to (x, y) for each movement action / facing direction
+    DIRECTIONS = {
+        'Up': (0, 1),
+        'Down': (0, -1),
+        'Left': (-1, 0),
+        'Right': (1, 0)
+    }
 
     def __init__(self, width=10, height=10, num_food=10, num_opponents=2, num_traps=5, custom_walls=None):
         self.width = width
         self.height = height
         self.agent_pos = [0, 0]  # Starting position (x, y)
+        self.agent_dir = 'Right'  # Direction the agent is currently facing
 
         if custom_walls is not None:
             self.walls = set(custom_walls)
@@ -49,40 +60,64 @@ class VisualGridHuntGame:
         self.collision = False
 
     def get_percept(self) -> dict:
+        """Return only what the agent can sense locally (partial observability).
+
+        Global position, opponent coordinates and the scoreboard are all hidden:
+        the agent learns just whether the cell it is facing is blocked and what
+        it is standing on.
+        """
+        dx, dy = self.DIRECTIONS[self.agent_dir]
+        ahead = (self.agent_pos[0] + dx, self.agent_pos[1] + dy)
+
+        # Off-grid counts as a wall, since the agent cannot move there either
+        out_of_bounds = not (0 <= ahead[0] < self.width and 0 <= ahead[1] < self.height)
+
         return {
-            'agent_pos': list(self.agent_pos),
-            'opponent_positions': [list(op) for op in self.opponents],
-            'smells_food': tuple(self.agent_pos) in self.food_positions,
-            'smells_toxin': tuple(self.agent_pos) in self.toxic_traps,
-            'hit_wall': tuple(self.agent_pos) in self.walls,
-            'collision': self.collision,
-            'score': self.score,
-            'remaining_food': len(self.food_positions)
+            'wall_ahead': out_of_bounds or ahead in self.walls,
+            'food_here': tuple(self.agent_pos) in self.food_positions,
+            'toxin_here': tuple(self.agent_pos) in self.toxic_traps,
+            'opponent_ahead': any(tuple(op) == ahead for op in self.opponents)
         }
+
+    # Counter-clockwise / clockwise rotation order used by TurnLeft and TurnRight
+    TURN_ORDER = ['Right', 'Up', 'Left', 'Down']
 
     def execute_action(self, action: str):
         self.steps += 1
         new_pos = list(self.agent_pos)
 
-        if action == 'Up':
-            new_pos[1] = min(self.height - 1, new_pos[1] + 1)
-        elif action == 'Down':
-            new_pos[1] = max(0, new_pos[1] - 1)
-        elif action == 'Left':
-            new_pos[0] = max(0, new_pos[0] - 1)
-        elif action == 'Right':
-            new_pos[0] = min(self.width - 1, new_pos[0] + 1)
+        if action == 'Suck':
+            # Consume the pellet underfoot, if there is one
+            tuple_pos = tuple(self.agent_pos)
+            if tuple_pos in self.food_positions:
+                self.food_positions.remove(tuple_pos)
+                self.score += 20
 
-        if tuple(new_pos) in self.walls:
-            self.score -= 5
+        elif action in ('TurnLeft', 'TurnRight'):
+            # Rotating in place: the agent changes facing but does not move
+            i = self.TURN_ORDER.index(self.agent_dir)
+            step = 1 if action == 'TurnLeft' else -1
+            self.agent_dir = self.TURN_ORDER[(i + step) % len(self.TURN_ORDER)]
+
         else:
-            self.agent_pos = new_pos
+            if action == 'Forward':
+                dx, dy = self.DIRECTIONS[self.agent_dir]
+            elif action in self.DIRECTIONS:
+                self.agent_dir = action  # An absolute move also turns the agent that way
+                dx, dy = self.DIRECTIONS[action]
+            else:
+                dx, dy = 0, 0
+
+            # Clamp to the grid: walking off the edge leaves the agent where it was
+            new_pos[0] = max(0, min(self.width - 1, new_pos[0] + dx))
+            new_pos[1] = max(0, min(self.height - 1, new_pos[1] + dy))
+
+            if tuple(new_pos) in self.walls:
+                self.score -= 5
+            else:
+                self.agent_pos = new_pos
 
         tuple_pos = tuple(self.agent_pos)
-        if tuple_pos in self.food_positions:
-            self.food_positions.remove(tuple_pos)
-            self.score += 20
-
         if tuple_pos in self.toxic_traps:
             self.score -= 15
 
@@ -114,6 +149,7 @@ class GridGameGUI:
 
         self.env = VisualGridHuntGame(width=width, height=height, num_food=num_food, num_opponents=num_opponents,
                                       custom_walls=walls)
+        self.agent = SimpleReflexAgent()
 
         # Dynamically calculate cell size so the total canvas fits nicely within a 600x600 window ceiling
         max_canvas_dim = 600
@@ -181,16 +217,26 @@ class GridGameGUI:
         self.canvas.create_oval(x1, y1, x1 + self.cell_size * 0.7, y1 + self.cell_size * 0.7, fill="#000066",
                                 outline="#1e3a8a")
 
+        # Whisker showing which way the agent is facing, so turns are visible
+        cx = ax * self.cell_size + self.cell_size / 2
+        cy = (self.env.height - 1 - ay) * self.cell_size + self.cell_size / 2
+        dx, dy = self.env.DIRECTIONS[self.env.agent_dir]
+        r = self.cell_size * 0.45
+        self.canvas.create_line(cx, cy, cx + dx * r, cy - dy * r, fill="#facc15", width=3)
+
     def run_loop(self):
         self.btn.config(state="disabled")
 
         def step():
             if not self.env.is_done():
-                action = random.choice(['Up', 'Down', 'Left', 'Right'])
+                # The agent sees only local booleans and reacts to them
+                percept = self.env.get_percept()
+                action = self.agent.sense_and_act(percept)
                 self.env.execute_action(action)
 
                 self.draw_grid()
-                self.label.config(text=f"Score: {self.env.score} | Steps: {self.env.steps} | Action: {action}")
+                self.label.config(text=f"Score: {self.env.score} | Steps: {self.env.steps} | "
+                                       f"Action: {action} | Facing: {self.env.agent_dir}")
                 self.root.after(250, step)
             else:
                 end_text = f"Collision! Game Over! Final Score: {self.env.score}" if self.env.collision else f"Finished! Final Score: {self.env.score}"
