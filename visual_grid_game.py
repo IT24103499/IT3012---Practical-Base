@@ -60,11 +60,12 @@ class VisualGridHuntGame:
         self.collision = False
 
     def get_percept(self) -> dict:
-        """Return only what the agent can sense locally (partial observability).
+        """Return the local senses plus the global state space the agent plans over.
 
-        Global position, opponent coordinates and the scoreboard are all hidden:
-        the agent learns just whether the cell it is facing is blocked and what
-        it is standing on.
+        The local booleans are still there (what is ahead, what is underfoot),
+        but a goal-based agent also needs the map itself: the grid bounds, the
+        wall layout and every remaining pellet, so it can simulate paths with
+        BFS / DFS / UCS before committing to a physical action.
         """
         dx, dy = self.DIRECTIONS[self.agent_dir]
         ahead = (self.agent_pos[0] + dx, self.agent_pos[1] + dy)
@@ -76,7 +77,12 @@ class VisualGridHuntGame:
             'wall_ahead': out_of_bounds or ahead in self.walls,
             'food_here': tuple(self.agent_pos) in self.food_positions,
             'toxin_here': tuple(self.agent_pos) in self.toxic_traps,
-            'opponent_ahead': any(tuple(op) == ahead for op in self.opponents)
+            'opponent_ahead': any(tuple(op) == ahead for op in self.opponents),
+
+            # Global state space exposed for search-based planning
+            'grid_size': (self.width, self.height),
+            'walls': list(self.walls),
+            'all_food': list(self.food_positions)
         }
 
     # Counter-clockwise / clockwise rotation order used by TurnLeft and TurnRight
