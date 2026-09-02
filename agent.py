@@ -1,5 +1,7 @@
 # agent.py
+import heapq
 import random
+from collections import deque
 
 
 class GreedyGridAgent:
@@ -117,3 +119,203 @@ class ModelBasedAgent:
             return min((j - i) % 4, (i - j) % 4)
 
         return min(candidates, key=turns)
+
+
+class SearchAgent:
+    """A goal-based (planning) agent.
+
+    Instead of reacting to the cell in front of it, this agent receives the
+    global state space in the percept ('grid_size', 'walls', 'all_food') and
+    *simulates* journeys through it before moving. Each search below is a
+    GRAPH search: the `reached` set records every state that has already been
+    expanded, so the agent never re-explores a cell and never falls into the
+    infinite loop a plain tree search would.
+    """
+
+    DELTAS = {'Right': (1, 0), 'Up': (0, 1), 'Left': (-1, 0), 'Down': (0, -1)}
+
+    def __init__(self, active_algo='BFS'):
+        self.plan = []                    # Queued actions still to be executed
+        self.active_algo = active_algo    # Which search to plan with: 'BFS', 'DFS' or 'UCS'
+        self.pos = (0, 0)                 # Dead-reckoned position (the percept has no coordinates)
+
+    # ------------------------------------------------------------------
+    # Agent program: plan once, then execute the plan one action per tick
+    # ------------------------------------------------------------------
+    def sense_and_act(self, percept: dict) -> str:
+        # Standing on a pellet is always worth a free Suck
+        if percept['food_here']:
+            return 'Suck'
+
+        if not self.plan:                 # No plan in memory -> think before moving
+            self.plan = self._formulate_plan(percept)
+
+        if not self.plan:                 # Nothing reachable: rotate and re-sense
+            return 'TurnLeft'
+
+        action = self.plan.pop(0)         # Execute the next step of the plan
+        if action in self.DELTAS:         # Keep the internal position model in sync
+            dx, dy = self.DELTAS[action]
+            self.pos = (self.pos[0] + dx, self.pos[1] + dy)
+        return action
+
+    def _formulate_plan(self, percept: dict) -> list:
+        """GOAL FORMULATION + SEARCH: pick the closest pellet, then simulate a
+        route to it with the configured algorithm and translate it to actions."""
+        food = [tuple(f) for f in percept['all_food']]
+        if not food:
+            return []
+
+        walls = percept['walls']
+        grid_size = percept['grid_size']
+
+        # Closest by Manhattan distance -- the goal we commit to searching for
+        goal = min(food, key=lambda f: abs(f[0] - self.pos[0]) + abs(f[1] - self.pos[1]))
+
+        algo = self.active_algo.upper()
+        if algo == 'BFS':
+            path = self.bfs_search(self.pos, goal, walls, grid_size)
+        elif algo == 'DFS':
+            path = self.dfs_search(self.pos, goal, walls, grid_size)
+        elif algo == 'UCS':
+            path, _cost = self.ucs_search(self.pos, goal, walls, grid_size)
+        else:
+            raise ValueError(f"Unknown search algorithm: {self.active_algo}")
+
+        if path is None:
+            # That pellet is walled off; retry with every pellet as a goal
+            path = self.bfs_search(self.pos, food, walls, grid_size)
+            if path is None:
+                return []
+
+        return self._path_to_actions(path)
+
+    def _path_to_actions(self, path: list) -> list:
+        """Turn a list of cells into the movement actions that walk it,
+        finishing with a Suck on the goal square."""
+        actions = []
+        for (x1, y1), (x2, y2) in zip(path, path[1:]):
+            step = (x2 - x1, y2 - y1)
+            for name, delta in self.DELTAS.items():
+                if delta == step:
+                    actions.append(name)
+                    break
+        actions.append('Suck')
+        return actions
+
+    # ------------------------------------------------------------------
+    # Successor function (the transition model the searches expand over)
+    # ------------------------------------------------------------------
+    def _successors(self, state, walls, grid_size):
+        """Return every legal neighbouring cell of `state`."""
+        width, height = grid_size
+        x, y = state
+        result = []
+        for dx, dy in self.DELTAS.values():
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < width and 0 <= ny < height and (nx, ny) not in walls:
+                result.append((nx, ny))
+        return result
+
+    @staticmethod
+    def _goal_set(goals):
+        """Accept a single (x, y) goal or a collection of them."""
+        if isinstance(goals, tuple) and len(goals) == 2 and all(isinstance(c, int) for c in goals):
+            return {goals}
+        return set(goals)
+
+    # ------------------------------------------------------------------
+    # 1. Breadth-First Search -- FIFO queue, shallowest node first
+    # ------------------------------------------------------------------
+    def bfs_search(self, start, goals, walls, grid_size):
+        """Shortest path in number of steps. Returns [start, ..., goal] or None."""
+        start = tuple(start)
+        goals = self._goal_set(goals)
+        walls = set(map(tuple, walls))
+
+        if start in goals:
+            return [start]
+
+        frontier = deque([(start, [start])])   # FIFO
+        reached = {start}                      # Graph search: never revisit a state
+
+        while frontier:
+            state, path = frontier.popleft()   # <-- shallowest node expands first
+
+            for nxt in self._successors(state, walls, grid_size):
+                if nxt in reached:
+                    continue
+                if nxt in goals:               # Early goal test: BFS is optimal here
+                    return path + [nxt]
+                reached.add(nxt)
+                frontier.append((nxt, path + [nxt]))
+
+        return None  # Goal unreachable
+
+    # ------------------------------------------------------------------
+    # 2. Depth-First Search -- LIFO stack, deepest node first
+    # ------------------------------------------------------------------
+    def dfs_search(self, start, goals, walls, grid_size):
+        """Dives down one branch as far as possible. Complete (graph search)
+        but NOT optimal: the path it finds is usually far from the shortest."""
+        start = tuple(start)
+        goals = self._goal_set(goals)
+        walls = set(map(tuple, walls))
+
+        frontier = [(start, [start])]  # LIFO
+        reached = set()                # Graph search: guards against cycles
+
+        while frontier:
+            state, path = frontier.pop()   # <-- deepest node expands first
+
+            if state in reached:
+                continue
+            reached.add(state)
+
+            if state in goals:            # Late goal test: no optimality to protect
+                return path
+
+            for nxt in self._successors(state, walls, grid_size):
+                if nxt not in reached:
+                    frontier.append((nxt, path + [nxt]))
+
+        return None  # Goal unreachable
+
+    # ------------------------------------------------------------------
+    # 3. Uniform-Cost Search -- priority queue ordered by path cost g(n)
+    # ------------------------------------------------------------------
+    def ucs_search(self, start, goals, walls, grid_size, cost_fn=None):
+        """Cheapest-first expansion. `cost_fn(cell)` gives the cost of entering
+        a cell (default 1 everywhere, which degenerates to BFS). Returns
+        (path, total_cost), or (None, inf) if no goal is reachable."""
+        start = tuple(start)
+        goals = self._goal_set(goals)
+        walls = set(map(tuple, walls))
+        if cost_fn is None:
+            cost_fn = lambda cell: 1
+
+        counter = 0  # Tie-breaker so heapq never has to compare the path lists
+        frontier = [(0, counter, start, [start])]
+        best_cost = {start: 0}   # Cheapest g(n) found so far per state
+        reached = set()          # States already expanded
+
+        while frontier:
+            g, _, state, path = heapq.heappop(frontier)  # <-- cheapest node first
+
+            if state in reached:
+                continue
+            reached.add(state)
+
+            if state in goals:   # Late goal test: required for UCS optimality
+                return path, g
+
+            for nxt in self._successors(state, walls, grid_size):
+                if nxt in reached:
+                    continue
+                new_g = g + cost_fn(nxt)
+                if new_g < best_cost.get(nxt, float('inf')):
+                    best_cost[nxt] = new_g
+                    counter += 1
+                    heapq.heappush(frontier, (new_g, counter, nxt, path + [nxt]))
+
+        return None, float('inf')
