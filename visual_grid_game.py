@@ -2,7 +2,7 @@
 import random
 import tkinter as tk
 
-from agent import SimpleReflexAgent
+from agent import SearchAgent
 
 
 class VisualGridHuntGame:
@@ -155,7 +155,7 @@ class GridGameGUI:
 
         self.env = VisualGridHuntGame(width=width, height=height, num_food=num_food, num_opponents=num_opponents,
                                       custom_walls=walls)
-        self.agent = SimpleReflexAgent()
+        self.agent = SearchAgent(active_algo='AStar')
 
         # Dynamically calculate cell size so the total canvas fits nicely within a 600x600 window ceiling
         max_canvas_dim = 600
