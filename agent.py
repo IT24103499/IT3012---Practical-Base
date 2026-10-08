@@ -1,5 +1,6 @@
 # agent.py
 import heapq
+import math
 import random
 from collections import deque
 
@@ -179,6 +180,8 @@ class SearchAgent:
             path = self.dfs_search(self.pos, goal, walls, grid_size)
         elif algo == 'UCS':
             path, _cost = self.ucs_search(self.pos, goal, walls, grid_size)
+        elif algo == 'ASTAR':
+            path = self.astar_search(self.pos, goal, walls, grid_size, 'manhattan')
         else:
             raise ValueError(f"Unknown search algorithm: {self.active_algo}")
 
@@ -223,6 +226,17 @@ class SearchAgent:
         if isinstance(goals, tuple) and len(goals) == 2 and all(isinstance(c, int) for c in goals):
             return {goals}
         return set(goals)
+
+    # ------------------------------------------------------------------
+    # Heuristic functions h(n) -- estimated cost from a cell to the goal
+    # ------------------------------------------------------------------
+    def manhattan_distance(self, pos, goal):
+        """h(n) = |x1 - x2| + |y1 - y2|, the grid distance with no diagonals."""
+        return int(abs(pos[0] - goal[0]) + abs(pos[1] - goal[1]))
+
+    def euclidean_distance(self, pos, goal):
+        """h(n) = sqrt((x1 - x2)^2 + (y1 - y2)^2), the straight-line distance."""
+        return math.sqrt((pos[0] - goal[0]) ** 2 + (pos[1] - goal[1]) ** 2)
 
     # ------------------------------------------------------------------
     # 1. Breadth-First Search -- FIFO queue, shallowest node first
@@ -319,3 +333,50 @@ class SearchAgent:
                     heapq.heappush(frontier, (new_g, counter, nxt, path + [nxt]))
 
         return None, float('inf')
+
+    # ------------------------------------------------------------------
+    # 4. A* Search -- priority queue ordered by f(n) = g(n) + h(n)
+    # ------------------------------------------------------------------
+    def astar_search(self, start_pos, goal_pos, walls, grid_size, heuristic_type='manhattan'):
+        """Informed search: expands the node with the lowest estimated total
+        cost f(n) = g(n) + h(n). Returns [start, ..., goal] or None."""
+        start_pos = tuple(start_pos)
+        goal_pos = tuple(goal_pos)
+        walls = set(map(tuple, walls))
+
+        # Pick the heuristic h(n) to guide the search
+        if heuristic_type == 'manhattan':
+            heuristic = self.manhattan_distance
+        elif heuristic_type == 'euclidean':
+            heuristic = self.euclidean_distance
+        else:
+            raise ValueError(f"Unknown heuristic: {heuristic_type}")
+
+        frontier = []           # Priority queue ordered by f_cost
+        reached_states = set()  # Graph search: states already expanded
+
+        # Initial node: g(n) = 0, so f(n) = h(n)
+        g_cost = 0
+        h_cost = heuristic(start_pos, goal_pos)
+        heapq.heappush(frontier, (g_cost + h_cost, g_cost, start_pos, [start_pos]))
+
+        while frontier:
+            f_cost, g_cost, current_pos, path_taken = heapq.heappop(frontier)
+
+            if current_pos == goal_pos:   # Goal test on expansion keeps A* optimal
+                return path_taken
+
+            if current_pos in reached_states:
+                continue
+            reached_states.add(current_pos)
+
+            # Expand the four adjacent cells (Up, Down, Left, Right)
+            for neighbour in self._successors(current_pos, walls, grid_size):
+                if neighbour in reached_states:
+                    continue
+                g_new = g_cost + 1
+                h_new = heuristic(neighbour, goal_pos)
+                f_new = g_new + h_new
+                heapq.heappush(frontier, (f_new, g_new, neighbour, path_taken + [neighbour]))
+
+        return None  # Goal unreachable
