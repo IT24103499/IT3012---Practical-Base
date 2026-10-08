@@ -4,6 +4,8 @@ import math
 import random
 from collections import deque
 
+from logic_engine import KnowledgeBase
+
 
 class GreedyGridAgent:
     """A simple agent that tries to move around systematically to clear the grid."""
@@ -140,6 +142,11 @@ class SearchAgent:
         self.active_algo = active_algo    # Which search to plan with: 'BFS', 'DFS' or 'UCS'
         self.pos = (0, 0)                 # Dead-reckoned position (the percept has no coordinates)
 
+        # Knowledge Base of safety rules (Horn clauses) consulted by A*
+        self.kb = KnowledgeBase()
+        self.kb.tell_rule(['TargetVisible', 'HasDust'], 'SafeToEngage')          # Rule 1
+        self.kb.tell_rule(['SafeToEngage', 'BloodseekerMissing'], 'Retreat')     # Rule 2
+
     # ------------------------------------------------------------------
     # Agent program: plan once, then execute the plan one action per tick
     # ------------------------------------------------------------------
@@ -148,8 +155,14 @@ class SearchAgent:
         if percept['food_here']:
             return 'Suck'
 
+        # Per-tile facts the game does not produce itself, supplied as {(x, y): [facts]}
+        tile_facts = {
+            (1, 0): ['TargetVisible', 'HasDust', 'BloodseekerMissing'],  # deduces Retreat: blocked
+            (0, 1): ['TargetVisible', 'HasDust'],                        # SafeToEngage only: allowed
+        }
+
         if not self.plan:                 # No plan in memory -> think before moving
-            self.plan = self._formulate_plan(percept)
+            self.plan = self._formulate_plan(percept, tile_facts)
 
         if not self.plan:                 # Nothing reachable: rotate and re-sense
             return 'TurnLeft'
@@ -160,7 +173,7 @@ class SearchAgent:
             self.pos = (self.pos[0] + dx, self.pos[1] + dy)
         return action
 
-    def _formulate_plan(self, percept: dict) -> list:
+    def _formulate_plan(self, percept: dict, tile_facts=None) -> list:
         """GOAL FORMULATION + SEARCH: pick the closest pellet, then simulate a
         route to it with the configured algorithm and translate it to actions."""
         food = [tuple(f) for f in percept['all_food']]
@@ -181,13 +194,16 @@ class SearchAgent:
         elif algo == 'UCS':
             path, _cost = self.ucs_search(self.pos, goal, walls, grid_size)
         elif algo == 'ASTAR':
-            path = self.astar_search(self.pos, goal, walls, grid_size, 'manhattan')
+            path = self.astar_search(self.pos, goal, walls, grid_size, 'manhattan', tile_facts=tile_facts)
         else:
             raise ValueError(f"Unknown search algorithm: {self.active_algo}")
 
         if path is None:
-            # That pellet is walled off; retry with every pellet as a goal
-            path = self.bfs_search(self.pos, food, walls, grid_size)
+            # That pellet is walled off; retry with every pellet as a goal,
+            # treating logically infeasible tiles as walls too
+            blocked = set(map(tuple, walls))
+            blocked |= {cell for cell in (tile_facts or {}) if not self.is_feasible(cell, tile_facts)}
+            path = self.bfs_search(self.pos, food, blocked, grid_size)
             if path is None:
                 return []
 
@@ -226,6 +242,18 @@ class SearchAgent:
         if isinstance(goals, tuple) and len(goals) == 2 and all(isinstance(c, int) for c in goals):
             return {goals}
         return set(goals)
+
+    # ------------------------------------------------------------------
+    # Feasibility check -- ask the Knowledge Base whether a tile is safe
+    # ------------------------------------------------------------------
+    def is_feasible(self, cell, tile_facts):
+        """Load the tile's facts into the KB, forward chain, and report the
+        tile infeasible if 'Retreat' is deduced."""
+        self.kb.clear_facts()
+        for fact in tile_facts.get(cell, []):
+            self.kb.tell_fact(fact)
+        self.kb.forward_chain()
+        return 'Retreat' not in self.kb.facts
 
     # ------------------------------------------------------------------
     # Heuristic functions h(n) -- estimated cost from a cell to the goal
@@ -337,9 +365,12 @@ class SearchAgent:
     # ------------------------------------------------------------------
     # 4. A* Search -- priority queue ordered by f(n) = g(n) + h(n)
     # ------------------------------------------------------------------
-    def astar_search(self, start_pos, goal_pos, walls, grid_size, heuristic_type='manhattan'):
+    def astar_search(self, start_pos, goal_pos, walls, grid_size, heuristic_type='manhattan', tile_facts=None):
         """Informed search: expands the node with the lowest estimated total
-        cost f(n) = g(n) + h(n). Returns [start, ..., goal] or None."""
+        cost f(n) = g(n) + h(n). Tiles where the KB deduces 'Retreat' are
+        skipped as infeasible. Returns [start, ..., goal] or None."""
+        if tile_facts is None:
+            tile_facts = {}
         start_pos = tuple(start_pos)
         goal_pos = tuple(goal_pos)
         walls = set(map(tuple, walls))
@@ -370,9 +401,13 @@ class SearchAgent:
                 continue
             reached_states.add(current_pos)
 
-            # Expand the four adjacent cells (Up, Down, Left, Right)
+            # Expand the four adjacent cells (Up, Down, Left, Right).
+            # _successors() checks REACHABILITY (in bounds, not a wall)...
             for neighbour in self._successors(current_pos, walls, grid_size):
                 if neighbour in reached_states:
+                    continue
+                # ...and the KB checks FEASIBILITY: skip tiles where Retreat is deduced
+                if not self.is_feasible(neighbour, tile_facts):
                     continue
                 g_new = g_cost + 1
                 h_new = heuristic(neighbour, goal_pos)
